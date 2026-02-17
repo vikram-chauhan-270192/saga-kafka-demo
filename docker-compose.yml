@@ -1,0 +1,150 @@
+version: "3.9"
+
+services:
+  kafka:
+    image: confluentinc/cp-kafka:7.5.3
+    container_name: kafka
+    ports:
+      - "9092:9092"
+    environment:
+      # -----------------------
+      # KRaft (no zookeeper)
+      # -----------------------
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+
+      KAFKA_LOG_DIRS: /tmp/kraft-combined-logs
+
+      # IMPORTANT: disable auto topic creation
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+
+    healthcheck:
+      test: ["CMD", "bash", "-c", "kafka-topics --bootstrap-server kafka:9092 --list || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+
+  # -----------------------------
+  # Kafka topic initializer
+  # -----------------------------
+  kafka-init:
+    image: confluentinc/cp-kafka:7.5.3
+    depends_on:
+      kafka:
+        condition: service_healthy
+    command: >
+      bash -c "
+        echo 'Waiting for Kafka...' &&
+        kafka-topics --bootstrap-server kafka:9092 --list &&
+        echo 'Creating topics...' &&
+
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic order.created --partitions 1 --replication-factor 1 &&
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic payment.charged --partitions 1 --replication-factor 1 &&
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic payment.failed --partitions 1 --replication-factor 1 &&
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic inventory.reserved --partitions 1 --replication-factor 1 &&
+        kafka-topics --bootstrap-server kafka:9092 --create --if-not-exists --topic inventory.failed --partitions 1 --replication-factor 1 &&
+
+        echo 'All topics created!' &&
+        kafka-topics --bootstrap-server kafka:9092 --list
+      "
+    restart: "no"
+
+  # -----------------------------
+  # Postgres per microservice
+  # -----------------------------
+  order-db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: order_user
+      POSTGRES_PASSWORD: order_pass
+      POSTGRES_DB: order_db
+    ports:
+      - "5433:5432"
+
+  payment-db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: payment_user
+      POSTGRES_PASSWORD: payment_pass
+      POSTGRES_DB: payment_db
+    ports:
+      - "5434:5432"
+
+  inventory-db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: inventory_user
+      POSTGRES_PASSWORD: inventory_pass
+      POSTGRES_DB: inventory_db
+    ports:
+      - "5435:5432"
+
+  # -----------------------------
+  # Microservices
+  # -----------------------------
+  order-service:
+    build: ./order-service
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      order-db:
+        condition: service_started
+    environment:
+      PORT: 4001
+      PGHOST: order-db
+      PGPORT: 5432
+      PGUSER: order_user
+      PGPASSWORD: order_pass
+      PGDATABASE: order_db
+      KAFKA_BROKER: kafka:9092
+    ports:
+      - "4001:4001"
+
+  payment-service:
+    build: ./payment-service
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      payment-db:
+        condition: service_started
+    environment:
+      PORT: 4002
+      PGHOST: payment-db
+      PGPORT: 5432
+      PGUSER: payment_user
+      PGPASSWORD: payment_pass
+      PGDATABASE: payment_db
+      KAFKA_BROKER: kafka:9092
+    ports:
+      - "4002:4002"
+
+  inventory-service:
+    build: ./inventory-service
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      inventory-db:
+        condition: service_started
+    environment:
+      PORT: 4003
+      PGHOST: inventory-db
+      PGPORT: 5432
+      PGUSER: inventory_user
+      PGPASSWORD: inventory_pass
+      PGDATABASE: inventory_db
+      KAFKA_BROKER: kafka:9092
+    ports:
+      - "4003:4003"
